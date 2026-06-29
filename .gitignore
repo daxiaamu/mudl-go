@@ -1,0 +1,46 @@
+# Go binaries
+*.exe
+*.dll
+*.exe~
+gh.exe
+
+# Build cache
+*.o
+*.obj
+*.test
+*.out
+*.a
+
+# Go workspace
+go.work
+go.work.sum
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+
+# Mu Downloader runtime files
+*.mudl.json
+
+# Temp
+tmp-msys/
+.tmp/
+.tmp-obj/
+tests/
+*.zip
+*.7z
+*.rar
