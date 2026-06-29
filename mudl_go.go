@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"math"
 	"mime"
 	"net/http"
 	"net/url"
@@ -29,9 +28,11 @@ type byteRange struct {
 }
 
 type task struct {
-	start int64
-	next  int64
-	end   int64
+	id       int64
+	start    int64
+	next     int64
+	reserved int64
+	end      int64
 }
 
 type scheduler struct {
@@ -68,26 +69,22 @@ func (s *scheduler) nextTask() *task {
 	if len(s.pending) > 0 {
 		r := s.pending[0]
 		s.pending = s.pending[1:]
-		remaining := r.end - r.start + 1
-		targetPieces := int64(max(1, s.workers*4))
-		chunk := int64(math.Ceil(float64(remaining) / float64(targetPieces)))
-		chunk = clamp(chunk, s.minChunk, s.maxChunk)
-		end := min64(r.end, r.start+chunk-1)
-		if end < r.end {
-			s.pending = append([]byteRange{{start: end + 1, end: r.end}}, s.pending...)
-		}
-		t := &task{start: r.start, next: r.start, end: end}
+		t := &task{id: s.nextTaskID, start: r.start, next: r.start, reserved: r.start - 1, end: r.end}
+		s.nextTaskID++
 		s.active[t] = struct{}{}
 		return t
 	}
 
 	var victim *task
 	var biggest int64
+	var protectedStart int64
 	for t := range s.active {
-		remaining := t.end - t.next + 1
-		if remaining > biggest {
+		start := max64(t.next, t.reserved+1)
+		remaining := t.end - start + 1
+		if remaining > biggest || (remaining == biggest && victim != nil && t.start > victim.start) {
 			biggest = remaining
 			victim = t
+			protectedStart = start
 		}
 	}
 	if victim == nil || biggest < s.minChunk*2 {
@@ -95,12 +92,13 @@ func (s *scheduler) nextTask() *task {
 	}
 
 	oldEnd := victim.end
-	split := victim.next + biggest/2
+	split := protectedStart + biggest/2
 	if oldEnd-split+1 < s.minChunk {
 		return nil
 	}
 	victim.end = split - 1
-	t := &task{start: split, next: split, end: oldEnd}
+	t := &task{id: s.nextTaskID, start: split, next: split, reserved: split - 1, end: oldEnd}
+	s.nextTaskID++
 	s.active[t] = struct{}{}
 	s.stealEvents++
 	return t
@@ -116,6 +114,41 @@ func (s *scheduler) reserve(t *task, maxBytes int64) (byteRange, bool) {
 	end := min64(t.end, start+maxBytes-1)
 	t.next = end + 1
 	return byteRange{start: start, end: end}, true
+}
+
+func (s *scheduler) beginRead(t *task, maxBytes int64) (byteRange, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if t.next > t.end {
+		return byteRange{}, false
+	}
+	start := t.next
+	end := min64(t.end, start+maxBytes-1)
+	t.reserved = end
+	return byteRange{start: start, end: end}, true
+}
+
+func (s *scheduler) commitRead(t *task, next int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if next > t.next {
+		t.next = next
+	}
+	if t.reserved < t.next-1 {
+		t.reserved = t.next - 1
+	}
+}
+
+func (s *scheduler) releaseRead(t *task) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t.reserved = t.next - 1
+}
+
+func (s *scheduler) taskBounds(t *task) (int64, int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return t.next, t.end
 }
 
 func (s *scheduler) finish(t *task) {
@@ -438,27 +471,28 @@ func worker(ctx context.Context, client *http.Client, rawURL string, file *os.Fi
 }
 
 func runTask(ctx context.Context, client *http.Client, rawURL string, file *os.File, sched *scheduler, t *task, stat *workerStat, totalDone *atomic.Int64, buf []byte, reserveSize int64, retries int, userAgent string) error {
-	for {
-		r, ok := sched.reserve(t, reserveSize)
-		if !ok {
+	_ = reserveSize
+	for attempt := 0; attempt <= retries; attempt++ {
+		start, end := sched.taskBounds(t)
+		if start > end {
 			return nil
 		}
 		var lastErr error
-		for attempt := 0; attempt <= retries; attempt++ {
-			written, err := downloadRange(ctx, client, rawURL, file, r, buf, userAgent)
-			if err == nil {
-				stat.add(written)
-				totalDone.Add(written)
-				lastErr = nil
-				break
-			}
-			lastErr = err
-			time.Sleep(time.Duration(150*(attempt+1)) * time.Millisecond)
+		written, err := downloadDynamicRange(ctx, client, rawURL, file, sched, t, buf, userAgent)
+		if written > 0 {
+			stat.add(written)
+			totalDone.Add(written)
 		}
-		if lastErr != nil {
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if attempt == retries {
 			return lastErr
 		}
+		time.Sleep(time.Duration(150*(attempt+1)) * time.Millisecond)
 	}
+	return nil
 }
 
 func downloadRange(ctx context.Context, client *http.Client, rawURL string, file *os.File, r byteRange, buf []byte, userAgent string) (int64, error) {
@@ -504,6 +538,72 @@ func downloadRange(ctx context.Context, client *http.Client, rawURL string, file
 		}
 	}
 	return written, nil
+}
+
+func downloadDynamicRange(ctx context.Context, client *http.Client, rawURL string, file *os.File, sched *scheduler, t *task, buf []byte, userAgent string) (int64, error) {
+	first, ok := sched.beginRead(t, int64(len(buf)))
+	if !ok {
+		return 0, nil
+	}
+	start := first.start
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		sched.releaseRead(t)
+		return 0, err
+	}
+	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("Accept-Encoding", "identity")
+	req.Header.Set("Range", fmt.Sprintf("bytes=%d-", start))
+
+	resp, err := client.Do(req)
+	if err != nil {
+		sched.releaseRead(t)
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusPartialContent {
+		sched.releaseRead(t)
+		return 0, fmt.Errorf("server ignored Range request: %s", resp.Status)
+	}
+
+	offset := start
+	written := int64(0)
+	current := first
+	for {
+		if offset > current.end {
+			next, ok := sched.beginRead(t, int64(len(buf)))
+			if !ok {
+				return written, nil
+			}
+			if next.start != offset {
+				sched.releaseRead(t)
+				return written, fmt.Errorf("dynamic range cursor mismatch: got %d, want %d", next.start, offset)
+			}
+			current = next
+		}
+		want := current.end - offset + 1
+		n, readErr := io.ReadFull(resp.Body, buf[:want])
+		if n > 0 {
+			if _, err := file.WriteAt(buf[:n], offset); err != nil {
+				sched.releaseRead(t)
+				return written, err
+			}
+			offset += int64(n)
+			written += int64(n)
+			sched.commitRead(t, offset)
+		}
+		if readErr != nil {
+			if readErr == io.EOF || readErr == io.ErrUnexpectedEOF {
+				if offset > current.end {
+					return written, nil
+				}
+				sched.releaseRead(t)
+				return written, fmt.Errorf("incomplete range from %d", start)
+			}
+			sched.releaseRead(t)
+			return written, readErr
+		}
+	}
 }
 
 func probe(client *http.Client, rawURL, userAgent string) (probeResult, error) {
