@@ -215,7 +215,8 @@ func main() {
 	var userAgent string
 	var progressMode string
 	var checkOnly bool
-	flag.StringVar(&output, "o", "", "output file path")
+	flag.StringVar(&output, "o", "", "output file path or directory")
+	flag.StringVar(&output, "output", "", "output file path or directory")
 	flag.IntVar(&workers, "c", 32, "concurrent workers")
 	flag.StringVar(&minChunkText, "min-chunk", "4MB", "minimum dynamic range size")
 	flag.StringVar(&maxChunkText, "max-chunk", "64MB", "maximum dynamic range size")
@@ -302,11 +303,9 @@ func download(ctx context.Context, client *http.Client, rawURL, output string, w
 		return "", errors.New("server did not provide Content-Length")
 	}
 
-	if output == "" {
-		output = probe.filename
-	}
-	if output == "" {
-		output = "download.bin"
+	output, err = resolveOutputPath(output, probe.filename)
+	if err != nil {
+		return "", err
 	}
 
 	if !probe.ranges {
@@ -318,10 +317,7 @@ func download(ctx context.Context, client *http.Client, rawURL, output string, w
 		fmt.Println(probe.rangeNote)
 	}
 
-	absOutput, err := filepath.Abs(output)
-	if err != nil {
-		return "", err
-	}
+	absOutput := output
 
 	file, err := os.OpenFile(absOutput, os.O_CREATE|os.O_RDWR, 0666)
 	if err != nil {
@@ -435,6 +431,40 @@ func singleDownload(ctx context.Context, client *http.Client, rawURL, output str
 	}
 	close(stop)
 	return absOutput, nil
+}
+
+func resolveOutputPath(output, filename string) (string, error) {
+	if filename == "" {
+		filename = "download.bin"
+	}
+	if output == "" {
+		return filepath.Abs(filename)
+	}
+
+	if info, err := os.Stat(output); err == nil && info.IsDir() {
+		return filepath.Abs(filepath.Join(output, filename))
+	}
+	if hasTrailingPathSeparator(output) {
+		if err := os.MkdirAll(output, 0777); err != nil {
+			return "", err
+		}
+		return filepath.Abs(filepath.Join(output, filename))
+	}
+
+	absOutput, err := filepath.Abs(output)
+	if err != nil {
+		return "", err
+	}
+	if dir := filepath.Dir(absOutput); dir != "." && dir != "" {
+		if err := os.MkdirAll(dir, 0777); err != nil {
+			return "", err
+		}
+	}
+	return absOutput, nil
+}
+
+func hasTrailingPathSeparator(path string) bool {
+	return strings.HasSuffix(path, string(os.PathSeparator)) || strings.HasSuffix(path, "/") || strings.HasSuffix(path, "\\")
 }
 
 func mergeProbe(headProbe, rangeProbe probeResult) probeResult {

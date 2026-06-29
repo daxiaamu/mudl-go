@@ -114,6 +114,44 @@ func TestProbeUsesCustomUserAgent(t *testing.T) {
 	}
 }
 
+func TestResolveOutputPathUsesExistingDirectory(t *testing.T) {
+	dir := t.TempDir()
+	got, err := resolveOutputPath(dir, "file.zip")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(dir, "file.zip")
+	if got != want {
+		t.Fatalf("output = %q, want %q", got, want)
+	}
+}
+
+func TestResolveOutputPathCreatesTrailingDirectory(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "downloads") + string(os.PathSeparator)
+	got, err := resolveOutputPath(dir, "file.zip")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Clean(filepath.Join(dir, "file.zip"))
+	if got != want {
+		t.Fatalf("output = %q, want %q", got, want)
+	}
+	if info, err := os.Stat(filepath.Clean(dir)); err != nil || !info.IsDir() {
+		t.Fatalf("expected directory to be created, info=%v err=%v", info, err)
+	}
+}
+
+func TestResolveOutputPathKeepsExplicitFilePath(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "custom.bin")
+	got, err := resolveOutputPath(file, "file.zip")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != file {
+		t.Fatalf("output = %q, want %q", got, file)
+	}
+}
+
 func TestDownloadUsesOpenEndedDynamicRanges(t *testing.T) {
 	data := make([]byte, 512*1024)
 	for i := range data {

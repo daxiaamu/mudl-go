@@ -27,6 +27,8 @@ Common options:
 
 ```powershell
 .\mudl-go.exe -c 32 -ua pan.baidu.com -min-chunk 8MB -max-chunk 128MB "URL"
+.\mudl-go.exe -o "D:\Downloads" "URL"
+.\mudl-go.exe -output "D:\Downloads\file.zip" "URL"
 ```
 
 Use quotes around URLs that contain `&`, especially signed URLs:
@@ -39,7 +41,8 @@ Options:
 
 | Option | Description |
 | --- | --- |
-| `-o` | Output file path |
+| `-o` | Output file path or existing/trailing directory; directories use the detected filename |
+| `-output` | Same as `-o` |
 | `-c` | Worker count |
 | `-min-chunk` | Minimum dynamic range size |
 | `-max-chunk` | Maximum dynamic range size |
@@ -116,6 +119,8 @@ go build -buildvcs=false -o mudl-go.exe .
 
 ```powershell
 .\mudl-go.exe -c 32 -ua pan.baidu.com -min-chunk 8MB -max-chunk 128MB "URL"
+.\mudl-go.exe -o "D:\Downloads" "URL"
+.\mudl-go.exe -output "D:\Downloads\file.zip" "URL"
 ```
 
 如果 URL 里包含 `&`，尤其是带签名参数的 URL，一定要用引号包住：
@@ -128,7 +133,8 @@ go build -buildvcs=false -o mudl-go.exe .
 
 | 参数 | 说明 |
 | --- | --- |
-| `-o` | 输出文件路径 |
+| `-o` | 输出文件路径，或已存在/末尾带斜杠的目录；目录会使用自动识别的文件名 |
+| `-output` | 等同于 `-o` |
 | `-c` | 下载线程数 |
 | `-min-chunk` | 动态 Range 最小大小 |
 | `-max-chunk` | 动态 Range 最大大小 |
