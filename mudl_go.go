@@ -21,7 +21,7 @@ import (
 	"time"
 )
 
-const userAgent = "pan.baidu.com"
+const defaultUserAgent = "mudl"
 
 type byteRange struct {
 	start int64
@@ -179,6 +179,7 @@ func main() {
 	var retries int
 	var bufferText string
 	var reserveText string
+	var userAgent string
 	var checkOnly bool
 	flag.StringVar(&output, "o", "", "output file path")
 	flag.IntVar(&workers, "c", 32, "concurrent workers")
@@ -188,6 +189,7 @@ func main() {
 	flag.IntVar(&retries, "retries", 5, "retries per reserved range")
 	flag.StringVar(&bufferText, "buffer", "1MB", "per-read buffer size")
 	flag.StringVar(&reserveText, "reserve", "32MB", "bytes reserved per HTTP Range request")
+	flag.StringVar(&userAgent, "ua", defaultUserAgent, "HTTP User-Agent")
 	flag.BoolVar(&checkOnly, "check", false, "probe URL and exit without downloading")
 	flag.Parse()
 
@@ -212,12 +214,12 @@ func main() {
 		reserveSize = bufferSize
 	}
 
-	client := makeHTTPClient(time.Duration(timeoutSec) * time.Second)
+	client := makeHTTPClient(time.Duration(timeoutSec)*time.Second, userAgent)
 	if checkOnly {
-		must(checkURL(client, rawURL))
+		must(checkURL(client, rawURL, userAgent))
 		return
 	}
-	saved, err := download(context.Background(), client, rawURL, output, workers, minChunk, maxChunk, bufferSize, reserveSize, retries)
+	saved, err := download(context.Background(), client, rawURL, output, workers, minChunk, maxChunk, bufferSize, reserveSize, retries, userAgent)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Error:", err)
 		os.Exit(1)
@@ -225,12 +227,12 @@ func main() {
 	fmt.Println("Saved to", saved)
 }
 
-func checkURL(client *http.Client, rawURL string) error {
-	headProbe, err := probe(client, rawURL)
+func checkURL(client *http.Client, rawURL, userAgent string) error {
+	headProbe, err := probe(client, rawURL, userAgent)
 	if err != nil {
 		return err
 	}
-	rangeProbe, rangeErr := probeRange(client, rawURL)
+	rangeProbe, rangeErr := probeRange(client, rawURL, userAgent)
 	merged := headProbe
 	if rangeErr == nil && rangeProbe.ranges {
 		merged = mergeProbe(headProbe, rangeProbe)
@@ -250,13 +252,13 @@ func checkURL(client *http.Client, rawURL string) error {
 	return nil
 }
 
-func download(ctx context.Context, client *http.Client, rawURL, output string, workers int, minChunk, maxChunk, bufferSize, reserveSize int64, retries int) (string, error) {
-	probe, err := probe(client, rawURL)
+func download(ctx context.Context, client *http.Client, rawURL, output string, workers int, minChunk, maxChunk, bufferSize, reserveSize int64, retries int, userAgent string) (string, error) {
+	probe, err := probe(client, rawURL, userAgent)
 	if err != nil {
 		return "", err
 	}
 	if !probe.ranges {
-		rangeProbe, err := probeRange(client, rawURL)
+		rangeProbe, err := probeRange(client, rawURL, userAgent)
 		if err == nil && rangeProbe.ranges {
 			probe = mergeProbe(probe, rangeProbe)
 		}
@@ -274,7 +276,7 @@ func download(ctx context.Context, client *http.Client, rawURL, output string, w
 
 	if !probe.ranges {
 		fmt.Println("Server did not confirm HTTP Range support; falling back to single connection.")
-		return singleDownload(ctx, client, rawURL, output, probe.size)
+		return singleDownload(ctx, client, rawURL, output, probe.size, userAgent)
 	}
 
 	if probe.rangeNote != "" {
@@ -312,7 +314,7 @@ func download(ctx context.Context, client *http.Client, rawURL, output string, w
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
-			if err := worker(ctx, client, rawURL, file, sched, stats[id], &done, bufferSize, reserveSize, retries); err != nil {
+			if err := worker(ctx, client, rawURL, file, sched, stats[id], &done, bufferSize, reserveSize, retries, userAgent); err != nil {
 				errCh <- err
 			}
 		}(i)
@@ -333,7 +335,7 @@ func download(ctx context.Context, client *http.Client, rawURL, output string, w
 	return absOutput, nil
 }
 
-func singleDownload(ctx context.Context, client *http.Client, rawURL, output string, total int64) (string, error) {
+func singleDownload(ctx context.Context, client *http.Client, rawURL, output string, total int64, userAgent string) (string, error) {
 	absOutput, err := filepath.Abs(output)
 	if err != nil {
 		return "", err
@@ -416,7 +418,7 @@ func mergeProbe(headProbe, rangeProbe probeResult) probeResult {
 	return headProbe
 }
 
-func worker(ctx context.Context, client *http.Client, rawURL string, file *os.File, sched *scheduler, stat *workerStat, totalDone *atomic.Int64, bufferSize, reserveSize int64, retries int) error {
+func worker(ctx context.Context, client *http.Client, rawURL string, file *os.File, sched *scheduler, stat *workerStat, totalDone *atomic.Int64, bufferSize, reserveSize int64, retries int, userAgent string) error {
 	buf := make([]byte, bufferSize)
 	for {
 		t := sched.nextTask()
@@ -425,7 +427,7 @@ func worker(ctx context.Context, client *http.Client, rawURL string, file *os.Fi
 			return nil
 		}
 		stat.begin(t.start, t.end)
-		if err := runTask(ctx, client, rawURL, file, sched, t, stat, totalDone, buf, reserveSize, retries); err != nil {
+		if err := runTask(ctx, client, rawURL, file, sched, t, stat, totalDone, buf, reserveSize, retries, userAgent); err != nil {
 			sched.finish(t)
 			stat.idle()
 			return err
@@ -435,7 +437,7 @@ func worker(ctx context.Context, client *http.Client, rawURL string, file *os.Fi
 	}
 }
 
-func runTask(ctx context.Context, client *http.Client, rawURL string, file *os.File, sched *scheduler, t *task, stat *workerStat, totalDone *atomic.Int64, buf []byte, reserveSize int64, retries int) error {
+func runTask(ctx context.Context, client *http.Client, rawURL string, file *os.File, sched *scheduler, t *task, stat *workerStat, totalDone *atomic.Int64, buf []byte, reserveSize int64, retries int, userAgent string) error {
 	for {
 		r, ok := sched.reserve(t, reserveSize)
 		if !ok {
@@ -443,7 +445,7 @@ func runTask(ctx context.Context, client *http.Client, rawURL string, file *os.F
 		}
 		var lastErr error
 		for attempt := 0; attempt <= retries; attempt++ {
-			written, err := downloadRange(ctx, client, rawURL, file, r, buf)
+			written, err := downloadRange(ctx, client, rawURL, file, r, buf, userAgent)
 			if err == nil {
 				stat.add(written)
 				totalDone.Add(written)
@@ -459,7 +461,7 @@ func runTask(ctx context.Context, client *http.Client, rawURL string, file *os.F
 	}
 }
 
-func downloadRange(ctx context.Context, client *http.Client, rawURL string, file *os.File, r byteRange, buf []byte) (int64, error) {
+func downloadRange(ctx context.Context, client *http.Client, rawURL string, file *os.File, r byteRange, buf []byte, userAgent string) (int64, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return 0, err
@@ -504,7 +506,7 @@ func downloadRange(ctx context.Context, client *http.Client, rawURL string, file
 	return written, nil
 }
 
-func probe(client *http.Client, rawURL string) (probeResult, error) {
+func probe(client *http.Client, rawURL, userAgent string) (probeResult, error) {
 	req, err := http.NewRequest(http.MethodHead, rawURL, nil)
 	if err != nil {
 		return probeResult{}, err
@@ -526,7 +528,7 @@ func probe(client *http.Client, rawURL string) (probeResult, error) {
 	}, nil
 }
 
-func probeRange(client *http.Client, rawURL string) (probeResult, error) {
+func probeRange(client *http.Client, rawURL, userAgent string) (probeResult, error) {
 	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
 	if err != nil {
 		return probeResult{}, err
@@ -671,7 +673,7 @@ func renderProgress(total, current, speed int64, sched *scheduler, stats []*work
 	return len(output)
 }
 
-func makeHTTPClient(timeout time.Duration) *http.Client {
+func makeHTTPClient(timeout time.Duration, userAgent string) *http.Client {
 	return &http.Client{
 		Timeout: timeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {

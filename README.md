@@ -41,6 +41,7 @@ Options:
 | `-timeout` | HTTP timeout in seconds |
 | `-retries` | Retries per reserved range |
 | `-buffer` | Per-read buffer size |
+| `-ua` | HTTP User-Agent, defaults to `mudl` |
 | `-check` | Probe URL and exit without downloading |
 
 ## Resume With A New URL
@@ -73,6 +74,12 @@ MIT
 
 ```powershell
 .\mudl-go.exe "URL" -c 32 -min-chunk 8MB -max-chunk 128MB -reserve 64MB
+```
+
+自定义 User-Agent：
+
+```powershell
+.\mudl-go.exe "URL" -ua "pan.baidu.com"
 ```
 
 如果链接过期，保留未完成文件和 `.mudl.json`，换新 URL 后继续：

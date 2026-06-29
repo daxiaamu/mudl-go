@@ -2,6 +2,7 @@ package main
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -46,5 +47,23 @@ func TestParseContentRangeSize(t *testing.T) {
 	}
 	if got != 90092968 {
 		t.Fatalf("size = %d, want 90092968", got)
+	}
+}
+
+func TestProbeUsesCustomUserAgent(t *testing.T) {
+	const wantUA = "custom-mudl"
+	seenUA := ""
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenUA = r.Header.Get("User-Agent")
+		w.Header().Set("Content-Length", "1")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	if _, err := probe(server.Client(), server.URL, wantUA); err != nil {
+		t.Fatal(err)
+	}
+	if seenUA != wantUA {
+		t.Fatalf("User-Agent = %q, want %q", seenUA, wantUA)
 	}
 }
