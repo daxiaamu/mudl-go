@@ -213,16 +213,18 @@ func main() {
 	var bufferText string
 	var reserveText string
 	var userAgent string
+	var progressMode string
 	var checkOnly bool
 	flag.StringVar(&output, "o", "", "output file path")
 	flag.IntVar(&workers, "c", 32, "concurrent workers")
 	flag.StringVar(&minChunkText, "min-chunk", "4MB", "minimum dynamic range size")
 	flag.StringVar(&maxChunkText, "max-chunk", "64MB", "maximum dynamic range size")
-	flag.IntVar(&timeoutSec, "timeout", 30, "HTTP timeout in seconds")
+	flag.IntVar(&timeoutSec, "timeout", 30, "HTTP response header timeout in seconds")
 	flag.IntVar(&retries, "retries", 5, "retries per reserved range")
 	flag.StringVar(&bufferText, "buffer", "1MB", "per-read buffer size")
 	flag.StringVar(&reserveText, "reserve", "32MB", "bytes reserved per HTTP Range request")
 	flag.StringVar(&userAgent, "ua", defaultUserAgent, "HTTP User-Agent")
+	flag.StringVar(&progressMode, "progress", "summary", "progress display: summary, details, none")
 	flag.BoolVar(&checkOnly, "check", false, "probe URL and exit without downloading")
 	flag.Parse()
 
@@ -252,7 +254,7 @@ func main() {
 		must(checkURL(client, rawURL, userAgent))
 		return
 	}
-	saved, err := download(context.Background(), client, rawURL, output, workers, minChunk, maxChunk, bufferSize, reserveSize, retries, userAgent)
+	saved, err := download(context.Background(), client, rawURL, output, workers, minChunk, maxChunk, bufferSize, reserveSize, retries, userAgent, progressMode)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Error:", err)
 		os.Exit(1)
@@ -285,7 +287,7 @@ func checkURL(client *http.Client, rawURL, userAgent string) error {
 	return nil
 }
 
-func download(ctx context.Context, client *http.Client, rawURL, output string, workers int, minChunk, maxChunk, bufferSize, reserveSize int64, retries int, userAgent string) (string, error) {
+func download(ctx context.Context, client *http.Client, rawURL, output string, workers int, minChunk, maxChunk, bufferSize, reserveSize int64, retries int, userAgent, progressMode string) (string, error) {
 	probe, err := probe(client, rawURL, userAgent)
 	if err != nil {
 		return "", err
@@ -341,7 +343,7 @@ func download(ctx context.Context, client *http.Client, rawURL, output string, w
 	errCh := make(chan error, workers)
 	var wg sync.WaitGroup
 	progressDone := make(chan struct{})
-	go printProgress(progressDone, probe.size, &done, sched, stats)
+	go printProgress(progressDone, probe.size, &done, sched, stats, progressMode)
 
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
@@ -478,11 +480,7 @@ func runTask(ctx context.Context, client *http.Client, rawURL string, file *os.F
 			return nil
 		}
 		var lastErr error
-		written, err := downloadDynamicRange(ctx, client, rawURL, file, sched, t, buf, userAgent)
-		if written > 0 {
-			stat.add(written)
-			totalDone.Add(written)
-		}
+		_, err := downloadDynamicRange(ctx, client, rawURL, file, sched, t, stat, totalDone, buf, userAgent)
 		if err == nil {
 			return nil
 		}
@@ -540,7 +538,7 @@ func downloadRange(ctx context.Context, client *http.Client, rawURL string, file
 	return written, nil
 }
 
-func downloadDynamicRange(ctx context.Context, client *http.Client, rawURL string, file *os.File, sched *scheduler, t *task, buf []byte, userAgent string) (int64, error) {
+func downloadDynamicRange(ctx context.Context, client *http.Client, rawURL string, file *os.File, sched *scheduler, t *task, stat *workerStat, totalDone *atomic.Int64, buf []byte, userAgent string) (int64, error) {
 	first, ok := sched.beginRead(t, int64(len(buf)))
 	if !ok {
 		return 0, nil
@@ -590,6 +588,8 @@ func downloadDynamicRange(ctx context.Context, client *http.Client, rawURL strin
 			}
 			offset += int64(n)
 			written += int64(n)
+			stat.add(int64(n))
+			totalDone.Add(int64(n))
 			sched.commitRead(t, offset)
 		}
 		if readErr != nil {
@@ -721,32 +721,59 @@ func sanitizeFilename(name string) string {
 	return name
 }
 
-func printProgress(doneCh <-chan struct{}, total int64, done *atomic.Int64, sched *scheduler, stats []*workerStat) {
+func printProgress(doneCh <-chan struct{}, total int64, done *atomic.Int64, sched *scheduler, stats []*workerStat, mode string) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	lastDone := int64(0)
+	smoothedSpeed := float64(0)
 	first := true
-	lines := 0
+	previous := 0
 	for {
 		select {
 		case <-doneCh:
 			current := done.Load()
-			renderProgress(total, current, current-lastDone, sched, stats, first, lines)
+			instant := current - lastDone
+			if smoothedSpeed == 0 {
+				smoothedSpeed = float64(instant)
+			}
+			renderProgress(total, current, int64(smoothedSpeed), sched, stats, first, previous, mode)
+			if mode == "summary" {
+				fmt.Println()
+			}
 			return
 		case <-ticker.C:
 			current := done.Load()
-			lines = renderProgress(total, current, current-lastDone, sched, stats, first, lines)
+			instant := current - lastDone
+			if first {
+				smoothedSpeed = float64(instant)
+			} else {
+				smoothedSpeed = smoothedSpeed*0.7 + float64(instant)*0.3
+			}
+			previous = renderProgress(total, current, int64(smoothedSpeed), sched, stats, first, previous, mode)
 			lastDone = current
 			first = false
 		}
 	}
 }
 
-func renderProgress(total, current, speed int64, sched *scheduler, stats []*workerStat, first bool, previousLines int) int {
-	if !first && previousLines > 0 {
-		fmt.Printf("\033[%dF", previousLines)
+func renderProgress(total, current, speed int64, sched *scheduler, stats []*workerStat, first bool, previous int, mode string) int {
+	if mode == "none" {
+		return 0
 	}
 	percent := float64(current) * 100 / float64(total)
+	if mode != "details" {
+		line := fmt.Sprintf("%6.2f%%  %s/%s  %s/s  conn %d/%d  split %d",
+			percent, humanSize(current), humanSize(total), humanSize(speed), sched.activeCount(), len(stats), sched.steals())
+		clear := 0
+		if previous > len(line) {
+			clear = previous - len(line)
+		}
+		fmt.Printf("\r%s%s", line, strings.Repeat(" ", clear))
+		return len(line)
+	}
+	if !first && previous > 0 {
+		fmt.Printf("\033[%dF", previous)
+	}
 	output := []string{
 		fmt.Sprintf("Total %6.2f%%  %s / %s  %s/s  active %d/%d  steals %d",
 			percent, humanSize(current), humanSize(total), humanSize(speed), sched.activeCount(), len(stats), sched.steals()),
@@ -775,7 +802,6 @@ func renderProgress(total, current, speed int64, sched *scheduler, stats []*work
 
 func makeHTTPClient(timeout time.Duration, userAgent string) *http.Client {
 	return &http.Client{
-		Timeout: timeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			req.Header.Del("Referer")
 			req.Header.Set("User-Agent", userAgent)

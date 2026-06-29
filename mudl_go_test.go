@@ -150,7 +150,7 @@ func TestDownloadUsesOpenEndedDynamicRanges(t *testing.T) {
 	defer server.Close()
 
 	output := filepath.Join(t.TempDir(), "out.bin")
-	saved, err := download(context.Background(), server.Client(), server.URL+"/file.bin", output, 4, 32*1024, 1024*1024, 16*1024, 256*1024, 2, "mudl-test")
+	saved, err := download(context.Background(), server.Client(), server.URL+"/file.bin", output, 4, 32*1024, 1024*1024, 16*1024, 256*1024, 2, "mudl-test", "none")
 	if err != nil {
 		t.Fatal(err)
 	}
