@@ -66,24 +66,64 @@ MIT
 
 # mudl-go 中文说明
 
-`mudl-go` 是一个专注命令行的动态多线程 HTTP 下载器。
+`mudl-go` 是一个专注命令行的轻量 HTTP 下载器，核心是动态多线程 Range 调度。
 
-核心目标是避免传统固定分片下载器的问题：某些线程提前下载完后空闲，而慢线程还在拖尾。`mudl-go` 会持续分配 Range 任务，并在必要时从正在下载的大区间尾部切走一段给空闲线程继续下载。
+## 功能特性
 
-快速使用：
+- **动态 Range 分配**：线程持续领取新的字节区间，而不是启动时固定分片后一直等到结束。
+- **尾部偷取**：当待下载队列为空时，空闲线程可以从仍在下载的大区间尾部切走一段继续下载。
+- **断点元数据**：未完成区间会保存到 `.mudl.json` 状态文件。
+- **新 URL 续传**：原链接过期后，可以保留原文件和 `.mudl.json`，用新 URL 继续同一个输出文件。
+- **文件名识别**：优先读取 `Content-Disposition`，否则使用 URL 文件名或 `-o` 指定的名称。
+- **实时命令行状态**：显示当前活跃线程数、总进度、剩余时间和每个线程速度。
+
+## 构建
+
+```powershell
+go build -buildvcs=false -o mudl-go.exe .
+```
+
+## 使用
+
+```powershell
+.\mudl-go.exe "https://example.com/big-file.zip"
+```
+
+常用参数：
 
 ```powershell
 .\mudl-go.exe "URL" -c 32 -min-chunk 8MB -max-chunk 128MB -reserve 64MB
 ```
 
-自定义 User-Agent：
+参数说明：
+
+| 参数 | 说明 |
+| --- | --- |
+| `-o` | 输出文件路径 |
+| `-c` | 下载线程数 |
+| `-min-chunk` | 动态 Range 最小大小 |
+| `-max-chunk` | 动态 Range 最大大小 |
+| `-reserve` | 每次 HTTP Range 请求预留的字节数 |
+| `-timeout` | HTTP 超时时间，单位秒 |
+| `-retries` | 每个预留区间的重试次数 |
+| `-buffer` | 每次读取的缓冲区大小 |
+| `-ua` | HTTP User-Agent，默认是 `mudl` |
+| `-check` | 只探测 URL，不下载 |
+
+## 使用新 URL 续传
+
+如果原链接过期，保留未完成文件和 `.mudl.json`，换新 URL 后继续：
 
 ```powershell
-.\mudl-go.exe "URL" -ua "pan.baidu.com"
+.\mudl-go.exe "https://new-url.example.com/file.zip" -o "existing-file.zip"
 ```
 
-如果链接过期，保留未完成文件和 `.mudl.json`，换新 URL 后继续：
+## 测试
 
 ```powershell
-.\mudl-go.exe "新URL" -o "原文件名.zip"
+go test -v .
 ```
+
+## 许可证
+
+MIT
